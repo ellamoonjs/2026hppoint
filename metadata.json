@@ -1,0 +1,6 @@
+{
+  "name": "교점과 교선 3D 시뮬레이션",
+  "description": "중학교 1학년 수학 교점(선과 선, 선과 면의 만남)과 교선(면과 면의 만남)을 3차원에서 직접 조작하며 탐구하는 시뮬레이션",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
