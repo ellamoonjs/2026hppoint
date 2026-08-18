@@ -4,7 +4,20 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { SceneObject, IntersectionResult, TransformMode } from '../types';
 import { getSolidKoreanName } from '../utils/geometryMath';
-import { RotateCw, Move, Check, HelpCircle, Sparkles, Navigation } from 'lucide-react';
+import {
+  RotateCw,
+  Move,
+  Check,
+  HelpCircle,
+  Sparkles,
+  Navigation,
+  Compass,
+  ArrowRight,
+  Maximize2,
+  RefreshCw,
+  Sliders,
+  Hand,
+} from 'lucide-react';
 
 interface ThreeCanvasProps {
   objects: SceneObject[];
@@ -43,6 +56,17 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
   // Mesh map to track rendered 3D objects
   const meshMapRef = useRef<Map<string, THREE.Object3D>>(new Map());
   const intersectionGroupRef = useRef<THREE.Group | null>(null);
+  const helperGroupRef = useRef<THREE.Group | null>(null);
+
+  // Direct dragging state refs
+  const dragPlaneRef = useRef<THREE.Plane>(new THREE.Plane());
+  const isDirectDraggingRef = useRef<boolean>(false);
+  const directDragTargetIdRef = useRef<string | null>(null);
+  const directDragModeRef = useRef<'translate' | 'rotate' | 'endpoint-start' | 'endpoint-end'>('translate');
+  const dragStartPointRef = useRef<THREE.Vector3>(new THREE.Vector3());
+  const dragObjStartPosRef = useRef<THREE.Vector3>(new THREE.Vector3());
+  const dragObjStartRotRef = useRef<THREE.Euler>(new THREE.Euler());
+  const lastPointerPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
   // 2D screen positions of intersection badges for overlay
   const [badgeOverlays, setBadgeOverlays] = useState<
@@ -56,6 +80,9 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
       visible: boolean;
     }>
   >([]);
+
+  // Selected object state helper
+  const selectedObj = objects.find((o) => o.id === selectedObjectId);
 
   // Initialize Three.js scene
   useEffect(() => {
@@ -107,7 +134,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
     dirLight2.position.set(-8, -6, -8);
     scene.add(dirLight2);
 
-    // Subtle floor circular grid for perspective (NO coordinate axes, clean educational look)
+    // Subtle floor circular grid for perspective (clean educational look)
     const floorGeo = new THREE.CircleGeometry(7, 64);
     floorGeo.rotateX(-Math.PI / 2);
     const floorMat = new THREE.MeshStandardMaterial({
@@ -144,9 +171,14 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
     scene.add(intersectionGroup);
     intersectionGroupRef.current = intersectionGroup;
 
-    // TransformControls for direct 3D dragging
+    // Group for angle handles & line endpoints
+    const helperGroup = new THREE.Group();
+    scene.add(helperGroup);
+    helperGroupRef.current = helperGroup;
+
+    // TransformControls for 3D gizmo manipulation
     const transformControls = new TransformControls(camera, renderer.domElement);
-    transformControls.size = 0.75;
+    transformControls.size = 0.85;
     transformControls.addEventListener('dragging-changed', (event) => {
       controls.enabled = !event.value;
     });
@@ -166,38 +198,206 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
     scene.add(transformControls.getHelper());
     transformControlsRef.current = transformControls;
 
-    // Click to select raycaster
+    // Direct Mouse / Touch Dragging & Raycaster Ray setup
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
 
-    const handleClick = (e: MouseEvent) => {
-      // Ignore if clicking on transform gizmo
-      if (transformControls.dragging) return;
-
+    const getRaycastHits = (e: PointerEvent | MouseEvent) => {
       const rect = renderer.domElement.getBoundingClientRect();
       mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-
       raycaster.setFromCamera(mouse, camera);
+
+      // Check helper group handles first (endpoint angle handles)
+      const handleHits = raycaster.intersectObjects(helperGroup.children, true);
+      if (handleHits.length > 0) {
+        return { type: 'handle', hit: handleHits[0] };
+      }
+
+      // Check scene objects
       const interactables: THREE.Object3D[] = [];
       meshMapRef.current.forEach((obj3D) => {
         interactables.push(obj3D);
       });
-
-      const intersects = raycaster.intersectObjects(interactables, true);
-      if (intersects.length > 0) {
-        // Find top parent that has a recorded ID
-        let target = intersects[0].object;
+      const objectHits = raycaster.intersectObjects(interactables, true);
+      if (objectHits.length > 0) {
+        let target = objectHits[0].object;
         while (target && !meshMapRef.current.has(target.name) && target.parent) {
           target = target.parent;
         }
         if (target && meshMapRef.current.has(target.name)) {
-          onSelectObject(target.name);
+          return { type: 'object', hit: objectHits[0], objectId: target.name };
+        }
+      }
+      return null;
+    };
+
+    const handlePointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return; // Only primary mouse button
+      if (transformControls.dragging) return;
+
+      const result = getRaycastHits(e);
+      if (result) {
+        lastPointerPosRef.current = { x: e.clientX, y: e.clientY };
+
+        if (result.type === 'handle') {
+          // Clicked an endpoint angle handle
+          const handleName = result.hit.object.name || (result.hit.object.parent && result.hit.object.parent.name);
+          const parentId = result.hit.object.userData.targetId || (result.hit.object.parent && result.hit.object.parent.userData.targetId);
+
+          if (parentId) {
+            onSelectObject(parentId);
+            directDragTargetIdRef.current = parentId;
+            isDirectDraggingRef.current = true;
+            controls.enabled = false;
+
+            if (handleName && handleName.includes('endpoint-start')) {
+              directDragModeRef.current = 'endpoint-start';
+            } else if (handleName && handleName.includes('endpoint-end')) {
+              directDragModeRef.current = 'endpoint-end';
+            } else {
+              directDragModeRef.current = 'rotate';
+            }
+
+            const targetMesh = meshMapRef.current.get(parentId);
+            if (targetMesh) {
+              dragObjStartPosRef.current.copy(targetMesh.position);
+              dragObjStartRotRef.current.copy(targetMesh.rotation);
+
+              // Set drag plane facing camera at object position
+              const normal = camera.getWorldDirection(new THREE.Vector3()).negate();
+              dragPlaneRef.current.setFromNormalAndCoplanarPoint(normal, targetMesh.position);
+              raycaster.ray.intersectPlane(dragPlaneRef.current, dragStartPointRef.current);
+            }
+          }
+        } else if (result.type === 'object' && result.objectId) {
+          onSelectObject(result.objectId);
+          directDragTargetIdRef.current = result.objectId;
+          isDirectDraggingRef.current = true;
+          controls.enabled = false;
+
+          // Determine mode: if Shift is pressed or transformMode is 'rotate', rotate; else translate
+          if (e.shiftKey || transformMode === 'rotate') {
+            directDragModeRef.current = 'rotate';
+          } else {
+            directDragModeRef.current = 'translate';
+          }
+
+          const targetMesh = meshMapRef.current.get(result.objectId);
+          if (targetMesh) {
+            dragObjStartPosRef.current.copy(targetMesh.position);
+            dragObjStartRotRef.current.copy(targetMesh.rotation);
+
+            // Drag plane parallel to camera viewport passing through object position
+            const normal = camera.getWorldDirection(new THREE.Vector3()).negate();
+            dragPlaneRef.current.setFromNormalAndCoplanarPoint(normal, targetMesh.position);
+            raycaster.ray.intersectPlane(dragPlaneRef.current, dragStartPointRef.current);
+          }
         }
       }
     };
 
-    renderer.domElement.addEventListener('click', handleClick);
+    const handlePointerMove = (e: PointerEvent) => {
+      // If direct dragging an object or endpoint
+      if (isDirectDraggingRef.current && directDragTargetIdRef.current) {
+        const rect = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+
+        const targetMesh = meshMapRef.current.get(directDragTargetIdRef.current);
+        if (!targetMesh) return;
+
+        const currentIntersect = new THREE.Vector3();
+        const hitPlane = raycaster.ray.intersectPlane(dragPlaneRef.current, currentIntersect);
+
+        if (directDragModeRef.current === 'translate' && hitPlane) {
+          const delta = currentIntersect.clone().sub(dragStartPointRef.current);
+          const newPos = dragObjStartPosRef.current.clone().add(delta);
+
+          // Constrain coordinates within pedagogical workspace
+          newPos.x = Math.max(-5, Math.min(5, newPos.x));
+          newPos.y = Math.max(-2, Math.min(4, newPos.y));
+          newPos.z = Math.max(-5, Math.min(5, newPos.z));
+
+          targetMesh.position.copy(newPos);
+          onUpdateObjectTransform(
+            directDragTargetIdRef.current,
+            [newPos.x, newPos.y, newPos.z],
+            [targetMesh.rotation.x, targetMesh.rotation.y, targetMesh.rotation.z]
+          );
+        } else if (
+          (directDragModeRef.current === 'endpoint-start' || directDragModeRef.current === 'endpoint-end') &&
+          hitPlane
+        ) {
+          // Direct Line Angle Manipulation by Dragging Endpoints!
+          const center = targetMesh.position;
+          let dir = currentIntersect.clone().sub(center);
+
+          if (directDragModeRef.current === 'endpoint-end') {
+            dir.negate();
+          }
+
+          if (dir.lengthSq() > 0.001) {
+            dir.normalize();
+
+            // Cylinder base in create3DObject is along local Z axis
+            const baseDir = new THREE.Vector3(0, 0, 1);
+            const quat = new THREE.Quaternion().setFromUnitVectors(baseDir, dir);
+            const euler = new THREE.Euler().setFromQuaternion(quat, 'XYZ');
+
+            targetMesh.rotation.copy(euler);
+            onUpdateObjectTransform(
+              directDragTargetIdRef.current,
+              [targetMesh.position.x, targetMesh.position.y, targetMesh.position.z],
+              [euler.x, euler.y, euler.z]
+            );
+          }
+        } else if (directDragModeRef.current === 'rotate') {
+          // Direct rotation by dragging
+          const dx = e.clientX - lastPointerPosRef.current.x;
+          const dy = e.clientY - lastPointerPosRef.current.y;
+
+          const rotSpeed = 0.012;
+          const newRot = new THREE.Euler(
+            targetMesh.rotation.x + dy * rotSpeed,
+            targetMesh.rotation.y + dx * rotSpeed,
+            targetMesh.rotation.z,
+            'XYZ'
+          );
+
+          targetMesh.rotation.copy(newRot);
+          onUpdateObjectTransform(
+            directDragTargetIdRef.current,
+            [targetMesh.position.x, targetMesh.position.y, targetMesh.position.z],
+            [newRot.x, newRot.y, newRot.z]
+          );
+          lastPointerPosRef.current = { x: e.clientX, y: e.clientY };
+        }
+      } else {
+        // Hover pointer cursor detection
+        const result = getRaycastHits(e);
+        if (result) {
+          renderer.domElement.style.cursor = 'grab';
+        } else {
+          renderer.domElement.style.cursor = 'default';
+        }
+      }
+    };
+
+    const handlePointerUp = () => {
+      if (isDirectDraggingRef.current) {
+        isDirectDraggingRef.current = false;
+        directDragTargetIdRef.current = null;
+        controls.enabled = true;
+        renderer.domElement.style.cursor = 'default';
+      }
+    };
+
+    renderer.domElement.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
 
     // Animation Loop
     let animationFrameId: number;
@@ -219,6 +419,18 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
         });
       }
 
+      // Animate pulsing handles for line endpoints
+      if (helperGroupRef.current) {
+        helperGroupRef.current.children.forEach((groupChild) => {
+          groupChild.children.forEach((child) => {
+            if (child.userData && child.userData.isPulsingHandle) {
+              const s = 1 + Math.sin(elapsedTime * 5) * 0.1;
+              child.scale.set(s, s, s);
+            }
+          });
+        });
+      }
+
       renderer.render(scene, camera);
 
       // Project 3D intersection points/lines to 2D screen coordinates
@@ -231,7 +443,6 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
         intersectionResult.points.forEach((pt) => {
           const v = pt.position.clone();
           v.project(cameraRef.current!);
-          // Check if in front of camera
           const isVisible = v.z < 1;
           const x = v.x * widthHalf + widthHalf;
           const y = -(v.y * heightHalf) + heightHalf;
@@ -290,7 +501,10 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
     return () => {
       resizeObserver.disconnect();
       cancelAnimationFrame(animationFrameId);
-      renderer.domElement.removeEventListener('click', handleClick);
+      renderer.domElement.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
       transformControls.dispose();
       renderer.dispose();
       if (container.contains(renderer.domElement)) {
@@ -359,6 +573,80 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
     }
   }, [objects, opacity, selectedObjectId]);
 
+  // Render Interactive Endpoint Angle Handles for Selected Line / Plane
+  useEffect(() => {
+    if (!helperGroupRef.current) return;
+    const helperGroup = helperGroupRef.current;
+
+    // Clear old helpers
+    while (helperGroup.children.length > 0) {
+      const child = helperGroup.children[0];
+      helperGroup.remove(child);
+      if ((child as THREE.Mesh).geometry) (child as THREE.Mesh).geometry.dispose();
+    }
+
+    if (!selectedObj) return;
+
+    if (selectedObj.type === 'line') {
+      const len = (selectedObj as any).length || 6;
+      const halfLen = len / 2;
+
+      // Transform group for handles matching line position and rotation
+      const lineHandleGroup = new THREE.Group();
+      lineHandleGroup.position.set(selectedObj.position[0], selectedObj.position[1], selectedObj.position[2]);
+      lineHandleGroup.rotation.set(selectedObj.rotation[0], selectedObj.rotation[1], selectedObj.rotation[2]);
+
+      // Start Handle (Endpoint +Z)
+      const startHandleGeo = new THREE.SphereGeometry(0.22, 20, 20);
+      const startHandleMat = new THREE.MeshStandardMaterial({
+        color: 0x3b82f6, // Blue
+        emissive: 0x2563eb,
+        emissiveIntensity: 0.5,
+        roughness: 0.2,
+      });
+      const startHandleMesh = new THREE.Mesh(startHandleGeo, startHandleMat);
+      startHandleMesh.position.set(0, 0, halfLen + 0.35);
+      startHandleMesh.name = 'endpoint-start';
+      startHandleMesh.userData = { isPulsingHandle: true, targetId: selectedObj.id };
+
+      // Glowing outer ring for start handle
+      const ringGeo = new THREE.RingGeometry(0.28, 0.42, 24);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0x60a5fa,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.85,
+      });
+      const startRing = new THREE.Mesh(ringGeo, ringMat);
+      startRing.position.copy(startHandleMesh.position);
+      startRing.rotateY(Math.PI / 2);
+
+      // End Handle (Endpoint -Z)
+      const endHandleGeo = new THREE.SphereGeometry(0.22, 20, 20);
+      const endHandleMat = new THREE.MeshStandardMaterial({
+        color: 0x10b981, // Emerald
+        emissive: 0x059669,
+        emissiveIntensity: 0.5,
+        roughness: 0.2,
+      });
+      const endHandleMesh = new THREE.Mesh(endHandleGeo, endHandleMat);
+      endHandleMesh.position.set(0, 0, -halfLen - 0.35);
+      endHandleMesh.name = 'endpoint-end';
+      endHandleMesh.userData = { isPulsingHandle: true, targetId: selectedObj.id };
+
+      const endRing = new THREE.Mesh(ringGeo, ringMat);
+      endRing.position.copy(endHandleMesh.position);
+      endRing.rotateY(Math.PI / 2);
+
+      lineHandleGroup.add(startHandleMesh);
+      lineHandleGroup.add(startRing);
+      lineHandleGroup.add(endHandleMesh);
+      lineHandleGroup.add(endRing);
+
+      helperGroup.add(lineHandleGroup);
+    }
+  }, [selectedObj]);
+
   // Render Intersections (Points and Lines) in 3D
   useEffect(() => {
     if (!intersectionGroupRef.current) return;
@@ -377,7 +665,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
       ptGroup.position.copy(pt.position);
       ptGroup.userData = { isPulsing: true };
 
-      // Vibrant core sphere (Neon Red / Magenta / Orange)
+      // Vibrant core sphere (Neon Red)
       const coreGeo = new THREE.SphereGeometry(0.18, 24, 24);
       const coreMat = new THREE.MeshBasicMaterial({
         color: 0xef4444, // Tailwind Red 500
@@ -394,7 +682,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
         opacity: 0.8,
       });
       const haloMesh = new THREE.Mesh(haloGeo, haloMat);
-      haloMesh.lookAt(new THREE.Vector3(7, 6, 8)); // Orient towards initial camera
+      haloMesh.lookAt(new THREE.Vector3(7, 6, 8));
       ptGroup.add(haloMesh);
 
       // 3D Pointing Arrow down to the point
@@ -413,7 +701,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
       const lineGroup = new THREE.Group();
 
       if (line.points.length >= 2) {
-        // High visibility tube or bold line
+        // High visibility tube for intersection line
         const curve = new THREE.CatmullRomCurve3(
           line.isClosed && line.points.length > 2 ? [...line.points, line.points[0]] : line.points,
           false,
@@ -462,7 +750,38 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
     }
   }, []);
 
-  const selectedObj = objects.find((o) => o.id === selectedObjectId);
+  // Quick Angle Adjustment Handlers
+  const handleRotateAngle = (axisIndex: 0 | 1 | 2, deltaDegrees: number) => {
+    if (!selectedObj) return;
+    const deltaRad = (deltaDegrees * Math.PI) / 180;
+    const newRot: [number, number, number] = [
+      selectedObj.rotation[0],
+      selectedObj.rotation[1],
+      selectedObj.rotation[2],
+    ];
+    newRot[axisIndex] = (newRot[axisIndex] + deltaRad) % (Math.PI * 2);
+    onUpdateObjectTransform(selectedObj.id, selectedObj.position, newRot);
+  };
+
+  const handleSetAnglePreset = (preset: 'horizontal' | 'vertical' | 'tilt45' | 'tiltNeg45') => {
+    if (!selectedObj) return;
+    let newRot: [number, number, number] = [0, 0, 0];
+    if (preset === 'horizontal') {
+      newRot = [0, selectedObj.rotation[1], 0];
+    } else if (preset === 'vertical') {
+      newRot = [Math.PI / 2, selectedObj.rotation[1], 0];
+    } else if (preset === 'tilt45') {
+      newRot = [Math.PI / 4, selectedObj.rotation[1], 0];
+    } else if (preset === 'tiltNeg45') {
+      newRot = [-Math.PI / 4, selectedObj.rotation[1], 0];
+    }
+    onUpdateObjectTransform(selectedObj.id, selectedObj.position, newRot);
+  };
+
+  // Degrees for display
+  const rotDegX = selectedObj ? Math.round(((selectedObj.rotation[0] * 180) / Math.PI) % 360) : 0;
+  const rotDegY = selectedObj ? Math.round(((selectedObj.rotation[1] * 180) / Math.PI) % 360) : 0;
+  const rotDegZ = selectedObj ? Math.round(((selectedObj.rotation[2] * 180) / Math.PI) % 360) : 0;
 
   return (
     <div className="relative w-full h-full select-none overflow-hidden" id="simulation-canvas-container">
@@ -478,7 +797,7 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
               className="absolute pointer-events-none transform -translate-x-1/2 -translate-y-full z-10 transition-all duration-75"
               style={{
                 left: `${badge.x}px`,
-                top: `${badge.y - 32}px`,
+                top: `${badge.y - 12}px`,
               }}
             >
               <div
@@ -497,7 +816,6 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
                     {badge.description}
                   </div>
                 )}
-                {/* Arrow indicator tip */}
                 <div
                   className={`w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-[6px] mt-0.5 ${
                     badge.type === 'point' ? 'border-t-red-500/95' : 'border-t-amber-500/95'
@@ -508,17 +826,17 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
           )
       )}
 
-      {/* Top Left Canvas HUD - Active Object Info & Quick Interaction Helpers */}
+      {/* Top Left Canvas HUD - Active Object Info & Direct Manipulation Panel */}
       <div className="absolute top-4 left-4 z-10 flex flex-col gap-2 pointer-events-none">
         {selectedObj ? (
-          <div className="pointer-events-auto bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-slate-200/80 dark:border-slate-800/80 rounded-2xl p-3.5 shadow-lg min-w-[250px]">
+          <div className="pointer-events-auto bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-slate-200/80 dark:border-slate-800/80 rounded-2xl p-3.5 shadow-lg min-w-[270px] max-w-[320px]">
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100 dark:border-slate-800">
               <div className="flex items-center gap-2">
                 <span
                   className="w-3 h-3 rounded-full border border-black/10 shadow-xs"
                   style={{ backgroundColor: selectedObj.color }}
                 />
-                <span className="font-bold text-xs text-slate-800 dark:text-slate-100">
+                <span className="font-bold text-xs text-slate-800 dark:text-slate-100 truncate max-w-[140px]">
                   {selectedObj.name} ({getSolidKoreanName(selectedObj.type)})
                 </span>
               </div>
@@ -527,17 +845,18 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
               </span>
             </div>
 
-            {/* Transform Mode Switcher */}
+            {/* Transform Mode Switcher (Drag Move vs Drag Rotate) */}
             <div className="mt-2.5 flex items-center gap-1.5 bg-slate-100/80 dark:bg-slate-800/80 p-1 rounded-xl">
               <button
                 id="btn-transform-translate"
                 type="button"
                 onClick={() => onSetTransformMode('translate')}
-                className={`flex-1 flex items-center justify-center gap-1.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
                   transformMode === 'translate'
                     ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-400 shadow-xs'
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                 }`}
+                title="도형을 잡고 위치를 드래그 이동합니다"
               >
                 <Move className="w-3.5 h-3.5" />
                 <span>위치 이동</span>
@@ -546,21 +865,131 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
                 id="btn-transform-rotate"
                 type="button"
                 onClick={() => onSetTransformMode('rotate')}
-                className={`flex-1 flex items-center justify-center gap-1.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
                   transformMode === 'rotate'
                     ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-400 shadow-xs'
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                 }`}
+                title="도형을 잡고 각도를 회전합니다"
               >
                 <RotateCw className="w-3.5 h-3.5" />
-                <span>각도 회전</span>
+                <span>각도 조절</span>
               </button>
             </div>
 
-            {/* Fine-tuning Position/Rotation Sliders for precision manipulation */}
-            <div className="mt-3 space-y-2 text-[11px] text-slate-600 dark:text-slate-400">
+            {/* Direct Line Endpoint Rotation Guide for Students */}
+            {selectedObj.type === 'line' && (
+              <div className="mt-2.5 p-2 bg-blue-50/70 dark:bg-blue-950/40 border border-blue-200/60 dark:border-blue-800/50 rounded-xl text-[11px] text-blue-700 dark:text-blue-300 flex items-start gap-1.5">
+                <Compass className="w-3.5 h-3.5 shrink-0 mt-0.5 text-blue-500" />
+                <span>
+                  <strong>직선 끝점 핸들:</strong> 직선의 파란색/초록색 끝점을 마우스로 드래그하면 원하는 방향으로 각도가 회전합니다.
+                </span>
+              </div>
+            )}
+
+            {/* Angle Manipulation Controls (각도 조작) */}
+            <div className="mt-3 pt-2.5 border-t border-slate-100 dark:border-slate-800">
+              <div className="flex items-center justify-between text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                <div className="flex items-center gap-1">
+                  <Compass className="w-3.5 h-3.5 text-blue-500" />
+                  <span>실시간 각도 조절 ({rotDegY}°)</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => handleRotateAngle(1, -15)}
+                    className="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded text-[10px] font-mono cursor-pointer"
+                    title="각도 -15° 회전"
+                  >
+                    -15°
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleRotateAngle(1, 15)}
+                    className="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded text-[10px] font-mono cursor-pointer"
+                    title="각도 +15° 회전"
+                  >
+                    +15°
+                  </button>
+                </div>
+              </div>
+
+              {/* Angle Presets for Fast Learning */}
+              <div className="grid grid-cols-3 gap-1 mb-2">
+                <button
+                  type="button"
+                  onClick={() => handleSetAnglePreset('horizontal')}
+                  className="py-1 px-1 bg-slate-100/90 dark:bg-slate-800 hover:bg-slate-200 text-[10px] font-medium text-slate-700 dark:text-slate-300 rounded-lg text-center transition-colors cursor-pointer"
+                >
+                  수평 (0°)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSetAnglePreset('tilt45')}
+                  className="py-1 px-1 bg-slate-100/90 dark:bg-slate-800 hover:bg-slate-200 text-[10px] font-medium text-slate-700 dark:text-slate-300 rounded-lg text-center transition-colors cursor-pointer"
+                >
+                  기울임 (45°)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSetAnglePreset('vertical')}
+                  className="py-1 px-1 bg-slate-100/90 dark:bg-slate-800 hover:bg-slate-200 text-[10px] font-medium text-slate-700 dark:text-slate-300 rounded-lg text-center transition-colors cursor-pointer"
+                >
+                  수직 (90°)
+                </button>
+              </div>
+
+              {/* Angle Sliders (Y축 회전 & X축 기울기) */}
+              <div className="space-y-1.5 text-[10px] text-slate-600 dark:text-slate-400">
+                <div className="flex items-center justify-between">
+                  <span>수평 회전각(Y):</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max={Math.PI * 2}
+                    step="0.05"
+                    value={selectedObj.rotation[1]}
+                    onChange={(e) =>
+                      onUpdateObjectTransform(selectedObj.id, selectedObj.position, [
+                        selectedObj.rotation[0],
+                        parseFloat(e.target.value),
+                        selectedObj.rotation[2],
+                      ])
+                    }
+                    className="w-24 h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                  />
+                  <span className="w-8 text-right font-mono font-bold text-slate-700 dark:text-slate-300">
+                    {rotDegY}°
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>상하 기울기(X):</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max={Math.PI * 2}
+                    step="0.05"
+                    value={selectedObj.rotation[0]}
+                    onChange={(e) =>
+                      onUpdateObjectTransform(selectedObj.id, selectedObj.position, [
+                        parseFloat(e.target.value),
+                        selectedObj.rotation[1],
+                        selectedObj.rotation[2],
+                      ])
+                    }
+                    className="w-24 h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                  />
+                  <span className="w-8 text-right font-mono font-bold text-slate-700 dark:text-slate-300">
+                    {rotDegX}°
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Position Controls (위치 조작) */}
+            <div className="mt-2.5 pt-2 border-t border-slate-100 dark:border-slate-800 space-y-1.5 text-[10px] text-slate-600 dark:text-slate-400">
               <div className="flex items-center justify-between">
-                <span className="font-medium">X 축 위치:</span>
+                <span>X 좌우 위치:</span>
                 <input
                   type="range"
                   min="-4"
@@ -574,16 +1003,18 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
                       selectedObj.rotation
                     )
                   }
-                  className="w-24 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                  className="w-24 h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
                 />
-                <span className="w-7 text-right font-mono font-semibold text-slate-700 dark:text-slate-300">{selectedObj.position[0].toFixed(1)}</span>
+                <span className="w-8 text-right font-mono font-bold text-slate-700 dark:text-slate-300">
+                  {selectedObj.position[0].toFixed(1)}
+                </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="font-medium">Y 축 높이:</span>
+                <span>Y 상하 높이:</span>
                 <input
                   type="range"
-                  min="-3"
-                  max="4"
+                  min="-2"
+                  max="3"
                   step="0.1"
                   value={selectedObj.position[1]}
                   onChange={(e) =>
@@ -593,12 +1024,14 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
                       selectedObj.rotation
                     )
                   }
-                  className="w-24 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                  className="w-24 h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
                 />
-                <span className="w-7 text-right font-mono font-semibold text-slate-700 dark:text-slate-300">{selectedObj.position[1].toFixed(1)}</span>
+                <span className="w-8 text-right font-mono font-bold text-slate-700 dark:text-slate-300">
+                  {selectedObj.position[1].toFixed(1)}
+                </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="font-medium">Z 축 깊이:</span>
+                <span>Z 앞뒤 깊이:</span>
                 <input
                   type="range"
                   min="-4"
@@ -612,55 +1045,35 @@ export const ThreeCanvas: React.FC<ThreeCanvasProps> = ({
                       selectedObj.rotation
                     )
                   }
-                  className="w-24 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                  className="w-24 h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
                 />
-                <span className="w-7 text-right font-mono font-semibold text-slate-700 dark:text-slate-300">{selectedObj.position[2].toFixed(1)}</span>
+                <span className="w-8 text-right font-mono font-bold text-slate-700 dark:text-slate-300">
+                  {selectedObj.position[2].toFixed(1)}
+                </span>
               </div>
 
-              {/* Quick Rotation Angle Buttons */}
-              <div className="pt-2 flex items-center gap-1.5">
+              {/* Center align button */}
+              <div className="pt-1 flex items-center justify-end">
                 <button
                   type="button"
-                  onClick={() =>
-                    onUpdateObjectTransform(
-                      selectedObj.id,
-                      selectedObj.position,
-                      [selectedObj.rotation[0], selectedObj.rotation[1] + Math.PI / 4, selectedObj.rotation[2]]
-                    )
-                  }
-                  className="flex-1 py-1.5 px-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg text-[10px] font-semibold text-slate-700 dark:text-slate-200 transition-colors active:scale-95 cursor-pointer"
+                  onClick={() => onUpdateObjectTransform(selectedObj.id, [0, 0, 0], [0, 0, 0])}
+                  className="py-1 px-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg text-[10px] font-semibold text-slate-700 dark:text-slate-200 transition-colors active:scale-95 cursor-pointer flex items-center gap-1"
                 >
-                  +45° 회전
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    onUpdateObjectTransform(
-                      selectedObj.id,
-                      selectedObj.position,
-                      [selectedObj.rotation[0] + Math.PI / 2, selectedObj.rotation[1], selectedObj.rotation[2]]
-                    )
-                  }
-                  className="flex-1 py-1.5 px-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg text-[10px] font-semibold text-slate-700 dark:text-slate-200 transition-colors active:scale-95 cursor-pointer"
-                >
-                  직각 회전
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    onUpdateObjectTransform(selectedObj.id, [0, 0, 0], [0, 0, 0])
-                  }
-                  className="py-1.5 px-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg text-[10px] font-semibold text-slate-700 dark:text-slate-200 transition-colors active:scale-95 cursor-pointer"
-                  title="원점 정렬"
-                >
-                  중앙
+                  <RefreshCw className="w-3 h-3" />
+                  <span>원점(0,0,0) 초기화</span>
                 </button>
               </div>
             </div>
           </div>
         ) : (
-          <div className="bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border border-slate-200/80 dark:border-slate-800/80 rounded-xl px-3.5 py-2 text-xs text-slate-600 dark:text-slate-400 shadow-sm">
-            <span className="font-bold text-slate-800 dark:text-slate-200">Tip:</span> 화면의 도형을 직접 클릭하여 이동/회전 핸들을 사용할 수 있습니다.
+          <div className="bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border border-slate-200/80 dark:border-slate-800/80 rounded-xl px-3.5 py-2.5 text-xs text-slate-600 dark:text-slate-400 shadow-sm max-w-[280px]">
+            <div className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5 mb-1">
+              <Sparkles className="w-3.5 h-3.5 text-blue-500" />
+              <span>직관적인 3D 드래그 탐구:</span>
+            </div>
+            <p className="text-[11px] leading-relaxed">
+              화면의 <strong>직선, 평면, 입체도형</strong>을 직접 마우스로 드래그하여 위치와 각도를 움직여보세요!
+            </p>
           </div>
         )}
       </div>
@@ -695,36 +1108,36 @@ function create3DObject(obj: SceneObject, opacity: number, isSelected: boolean):
 
   if (obj.type === 'line') {
     const len = (obj as any).length || 6;
-    // Main cylinder line
-    const cylGeo = new THREE.CylinderGeometry(0.06, 0.06, len, 16);
+    // Main cylinder line (thicker line with high click hit area for students)
+    const cylGeo = new THREE.CylinderGeometry(0.08, 0.08, len, 16);
     cylGeo.rotateX(Math.PI / 2);
     const cylMat = new THREE.MeshStandardMaterial({
       color: parsedColor,
       roughness: 0.3,
       metalness: 0.2,
       transparent: opacity < 0.99,
-      opacity: Math.max(opacity, 0.4),
+      opacity: Math.max(opacity, 0.5),
     });
     const cylMesh = new THREE.Mesh(cylGeo, cylMat);
     cylMesh.castShadow = true;
     group.add(cylMesh);
 
     // End arrow caps indicating infinite line concept in middle school math
-    const arrowGeo1 = new THREE.ConeGeometry(0.14, 0.4, 16);
+    const arrowGeo1 = new THREE.ConeGeometry(0.16, 0.45, 16);
     arrowGeo1.rotateX(Math.PI / 2);
     const arrowMat = new THREE.MeshStandardMaterial({ color: parsedColor });
     const arrow1 = new THREE.Mesh(arrowGeo1, arrowMat);
-    arrow1.position.z = len / 2 + 0.2;
+    arrow1.position.z = len / 2 + 0.22;
     group.add(arrow1);
 
-    const arrowGeo2 = new THREE.ConeGeometry(0.14, 0.4, 16);
+    const arrowGeo2 = new THREE.ConeGeometry(0.16, 0.45, 16);
     arrowGeo2.rotateX(-Math.PI / 2);
     const arrow2 = new THREE.Mesh(arrowGeo2, arrowMat);
-    arrow2.position.z = -len / 2 - 0.2;
+    arrow2.position.z = -len / 2 - 0.22;
     group.add(arrow2);
   } else if (obj.type === 'plane') {
-    const w = (obj as any).width || 4;
-    const h = (obj as any).height || 4;
+    const w = (obj as any).width || 4.8;
+    const h = (obj as any).height || 4.8;
 
     // Plane mesh (double sided)
     const planeGeo = new THREE.PlaneGeometry(w, h);
@@ -842,7 +1255,7 @@ function updateObjectMaterials(group: THREE.Group, obj: SceneObject, opacity: nu
       const mat = child.material as THREE.MeshStandardMaterial;
       if (mat.transparent !== undefined) {
         if (obj.type === 'line') {
-          mat.opacity = Math.max(opacity, 0.4);
+          mat.opacity = Math.max(opacity, 0.5);
         } else if (obj.type === 'plane') {
           mat.opacity = Math.min(opacity, 0.85);
         } else {
@@ -851,7 +1264,7 @@ function updateObjectMaterials(group: THREE.Group, obj: SceneObject, opacity: nu
       }
       if (isSelected) {
         mat.emissive = new THREE.Color(0x3b82f6);
-        mat.emissiveIntensity = 0.25;
+        mat.emissiveIntensity = 0.3;
       } else {
         mat.emissive = new THREE.Color(0x000000);
         mat.emissiveIntensity = 0;

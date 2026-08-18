@@ -1,5 +1,5 @@
 import React from 'react';
-import { SceneObject, ShapeType } from '../types';
+import { SceneObject, ShapeType, TransformMode } from '../types';
 import { getSolidKoreanName } from '../utils/geometryMath';
 import {
   Minus,
@@ -9,13 +9,14 @@ import {
   Cylinder as CylinderIcon,
   Cone as ConeIcon,
   Trash2,
-  Eye,
-  EyeOff,
   RotateCw,
   Sparkles,
   BookOpen,
-  Plus,
   Play,
+  Move,
+  Compass,
+  Sliders,
+  RefreshCw,
 } from 'lucide-react';
 
 interface RightMenuProps {
@@ -26,6 +27,13 @@ interface RightMenuProps {
   onSelectObject: (id: string | null) => void;
   onApplyPreset: (presetKey: string) => void;
   onOpenTheoryModal: () => void;
+  onUpdateObjectTransform?: (
+    id: string,
+    position: [number, number, number],
+    rotation: [number, number, number]
+  ) => void;
+  transformMode?: TransformMode;
+  onSetTransformMode?: (mode: TransformMode) => void;
 }
 
 export const RightMenu: React.FC<RightMenuProps> = ({
@@ -36,7 +44,41 @@ export const RightMenu: React.FC<RightMenuProps> = ({
   onSelectObject,
   onApplyPreset,
   onOpenTheoryModal,
+  onUpdateObjectTransform,
+  transformMode,
+  onSetTransformMode,
 }) => {
+  const selectedObj = objects.find((o) => o.id === selectedObjectId);
+
+  const rotDegX = selectedObj ? Math.round(((selectedObj.rotation[0] * 180) / Math.PI) % 360) : 0;
+  const rotDegY = selectedObj ? Math.round(((selectedObj.rotation[1] * 180) / Math.PI) % 360) : 0;
+  const rotDegZ = selectedObj ? Math.round(((selectedObj.rotation[2] * 180) / Math.PI) % 360) : 0;
+
+  const handleRotateAngle = (axisIndex: 0 | 1 | 2, deltaDegrees: number) => {
+    if (!selectedObj || !onUpdateObjectTransform) return;
+    const deltaRad = (deltaDegrees * Math.PI) / 180;
+    const newRot: [number, number, number] = [
+      selectedObj.rotation[0],
+      selectedObj.rotation[1],
+      selectedObj.rotation[2],
+    ];
+    newRot[axisIndex] = (newRot[axisIndex] + deltaRad) % (Math.PI * 2);
+    onUpdateObjectTransform(selectedObj.id, selectedObj.position, newRot);
+  };
+
+  const handleSetAnglePreset = (preset: 'horizontal' | 'vertical' | 'tilt45') => {
+    if (!selectedObj || !onUpdateObjectTransform) return;
+    let newRot: [number, number, number] = [0, 0, 0];
+    if (preset === 'horizontal') {
+      newRot = [0, selectedObj.rotation[1], 0];
+    } else if (preset === 'vertical') {
+      newRot = [Math.PI / 2, selectedObj.rotation[1], 0];
+    } else if (preset === 'tilt45') {
+      newRot = [Math.PI / 4, selectedObj.rotation[1], 0];
+    }
+    onUpdateObjectTransform(selectedObj.id, selectedObj.position, newRot);
+  };
+
   return (
     <aside
       id="right-sidebar-menu"
@@ -49,14 +91,14 @@ export const RightMenu: React.FC<RightMenuProps> = ({
             <span>도형 선택 & 탐구</span>
           </h2>
           <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-            도형을 추가하여 교점과 교선을 관찰해보세요
+            도형을 추가하고 드래그하여 각도를 조작해보세요
           </p>
         </div>
         <button
           id="btn-open-theory-modal"
           type="button"
           onClick={onOpenTheoryModal}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 bg-blue-50/80 dark:bg-blue-950/50 hover:bg-blue-100/90 dark:hover:bg-blue-900/80 text-blue-600 dark:text-blue-400 rounded-lg text-xs font-semibold border border-blue-200/70 dark:border-blue-800/60 transition-all active:scale-95 shadow-xs"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 bg-blue-50/80 dark:bg-blue-950/50 hover:bg-blue-100/90 dark:hover:bg-blue-900/80 text-blue-600 dark:text-blue-400 rounded-lg text-xs font-semibold border border-blue-200/70 dark:border-blue-800/60 transition-all active:scale-95 shadow-xs cursor-pointer"
           title="중1 수학 교점/교선 핵심 개념 보기"
         >
           <BookOpen className="w-3.5 h-3.5" />
@@ -287,7 +329,7 @@ export const RightMenu: React.FC<RightMenuProps> = ({
           </div>
         </div>
 
-        {/* Section 3: Active Scene Objects List */}
+        {/* Section 3: Active Scene Objects List & Selected Object Controls */}
         <div>
           <div className="flex items-center justify-between mb-2">
             <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
@@ -302,14 +344,14 @@ export const RightMenu: React.FC<RightMenuProps> = ({
               위의 버튼을 눌러 도형을 추가하세요.
             </div>
           ) : (
-            <div className="space-y-1.5 max-h-56 overflow-y-auto pr-0.5 custom-scrollbar">
+            <div className="space-y-1.5 max-h-52 overflow-y-auto pr-0.5 custom-scrollbar">
               {objects.map((obj) => {
                 const isSelected = selectedObjectId === obj.id;
                 return (
                   <div
                     key={obj.id}
                     onClick={() => onSelectObject(obj.id)}
-                    className={`flex items-center justify-between p-2 rounded-xl border text-xs cursor-pointer transition-all ${
+                    className={`flex items-center justify-between p-2.5 rounded-xl border text-xs cursor-pointer transition-all ${
                       isSelected
                         ? 'border-blue-500 bg-blue-50/80 dark:bg-blue-950/40 shadow-xs'
                         : 'border-slate-200/80 dark:border-slate-800 bg-white/90 dark:bg-slate-800/80 hover:bg-slate-50 dark:hover:bg-slate-800'
@@ -335,7 +377,7 @@ export const RightMenu: React.FC<RightMenuProps> = ({
                           e.stopPropagation();
                           onRemoveShape(obj.id);
                         }}
-                        className="p-1 text-slate-400 hover:text-red-500 rounded-md hover:bg-red-50 dark:hover:bg-red-950/50 transition-colors"
+                        className="p-1 text-slate-400 hover:text-red-500 rounded-md hover:bg-red-50 dark:hover:bg-red-950/50 transition-colors cursor-pointer"
                         title="도형 삭제"
                       >
                         <Trash2 className="w-3.5 h-3.5" />

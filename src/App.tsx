@@ -390,6 +390,9 @@ export default function App() {
           onSelectObject={setSelectedObjectId}
           onApplyPreset={handleApplyPreset}
           onOpenTheoryModal={() => setIsTheoryModalOpen(true)}
+          onUpdateObjectTransform={handleUpdateObjectTransform}
+          transformMode={transformMode}
+          onSetTransformMode={setTransformMode}
         />
       </div>
 
